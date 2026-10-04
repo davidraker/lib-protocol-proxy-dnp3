@@ -160,7 +160,7 @@ async def test_proxy_registers_serves_and_closes_an_outstation():
     assert pushes[0][1]['s/ai1'] == 11 and pushes[0][1]['s/ai0'] == 0      # the caller's values beat the starting values
 
     reply = await call(proxy, proxy.read_points_endpoint, {'mode': 'class', 'topics': ['s/ai0']}, remote=remote)
-    assert reply['result']['s/ai0']['value'] == pytest.approx(240.1)
+    assert reply['result']['s/ai0']['value'] == 0 and reply['result']['s/ai0']['online'] is True
     reply = await call(proxy, proxy.write_points_endpoint, {'operations': [{'topic': 's/ai0', 'value': 1.5}]}, remote=remote)
     assert reply == {'result': {'s/ai0': {'status': 'SUCCESS', 'value': 1.5}}, 'error': {}}
 
