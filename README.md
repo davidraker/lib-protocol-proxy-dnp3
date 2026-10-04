@@ -31,12 +31,14 @@ python -m protocol_proxy.proxy protocol_proxy.protocol.dnp3.dnp3_proxy:Dnp3Proxy
 ```
 
 The DNP3 proxy takes no protocol-specific launch options. Everything about an outstation arrives in messages, and every
-point is identified by the topic the caller registered it under:
+point is identified by the topic the caller registered it under. The caller's remote id (protocol-proxy header version 2)
+identifies the outstation in every message after `REGISTER_OUTSTATION`; a version 1 caller names it with `host`, `port`,
+`master_address` and `outstation_address` in the payload instead:
 
 | Message | Purpose |
 |---|---|
 | `REGISTER_OUTSTATION` | Create (or reuse) the master for an outstation and replace its point table. Carries `host`, `port` (20000), `master_address` (2), `outstation_address` (1), `response_timeout` (5 s), `link_reset` (true), `integrity_poll_interval` (3600 s; 0 disables the periodic integrity poll, one always runs on connect), `unsolicited` (false), `unsolicited_classes` ([1, 2, 3]) and `points`: a list of `{topic, group, variation, index, scaling, control_code, count, on_time, off_time}`. Registering again replaces the point table, so a caller re-registers after a configuration change. |
-| `READ_POINTS` | Refresh the outstation and reply with the values of `topics`. `mode` is `class` (read the data classes in `classes`, default `[0]`, static data), `integrity` (Class 0, 1, 2 and 3) or `points` (one range read per contiguous index span of each group and variation named). Whatever the mode, the read becomes an integrity poll when `integrity_poll_interval` has elapsed. |
+| `READ_POINTS` | Refresh the outstation named by the message's remote id and reply with the values of `topics`. `mode` is `class` (read the data classes in `classes`, default `[0]`, static data), `integrity` (Class 0, 1, 2 and 3) or `points` (one range read per contiguous index span of each group and variation named). Whatever the mode, the read becomes an integrity poll when `integrity_poll_interval` has elapsed. |
 | `WRITE_POINTS` | Operate outputs. `operations` are `{topic, value}`; `control_mode` is `direct` (DIRECT_OPERATE) or `sbo` (SELECT then OPERATE, the OPERATE sent only when the SELECT echo accepts every control). Binary outputs take a boolean and send the point's `control_code` (`latch` on/off, or `pulse` on/off with its `count`, `on_time` and `off_time`); analog outputs take a number, divided by the point's `scaling`, in the group 41 variation matching the registered group 40 variation. |
 | `CLOSE_OUTSTATION` | Close the connection and forget the outstation. |
 

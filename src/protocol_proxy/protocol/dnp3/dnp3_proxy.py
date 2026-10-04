@@ -1,8 +1,10 @@
 """The DNP3 protocol proxy: a process holding dnp3py masters for any number of outstations.
 
-Everything about an outstation arrives in messages (REGISTER_OUTSTATION), so the proxy takes no launch options. Reads
-and writes are keyed by the full point topics the caller registered, and unsolicited values are pushed back to the
-manager as RECEIVE_UNSOLICITED, keyed the same way.
+Everything about an outstation arrives in messages (REGISTER_OUTSTATION), so the proxy takes no launch options. The
+registering caller's remote id (header version 2) identifies the outstation in every later message; callers without
+one (header version 1) name it with the identity fields in the payload instead. Reads and writes are keyed by the full
+point topics the caller registered, and unsolicited values are pushed back to the manager as RECEIVE_UNSOLICITED,
+tagged with the remote id and keyed the same way.
 """
 import asyncio
 import json
@@ -31,6 +33,7 @@ class Dnp3Proxy(AsyncioProtocolProxy):
     def __init__(self, callback_timeout: float = DEFAULT_CALLBACK_TIMEOUT, **kwargs):
         super(Dnp3Proxy, self).__init__(**kwargs)
         self.clients: dict[str, OutstationClient] = {}
+        self.remotes: dict[UUID, OutstationClient] = {}      # by the caller's remote id (header version 2)
         self.loop = asyncio.get_event_loop()
         self.register_callback(self.register_outstation_endpoint, 'REGISTER_OUTSTATION', provides_response=True,
                                timeout=callback_timeout)
@@ -45,10 +48,14 @@ class Dnp3Proxy(AsyncioProtocolProxy):
         return (f"{message.get('host')}:{message.get('port', 20000)}:{message.get('outstation_address', 1)}"
                 f":{message.get('master_address', 2)}")
 
-    def _get_client(self, message: dict, action: str) -> OutstationClient | None:
-        client = self.clients.get(self.client_key(message))
+    def _get_client(self, headers, message: dict, action: str) -> OutstationClient | None:
+        """The outstation a request concerns: the header's remote id first, the payload's identity fields otherwise."""
+        remote_id = getattr(headers, 'remote_id', None)
+        client = self.remotes.get(remote_id) if remote_id else None
+        if client is None and message.get('host'):
+            client = self.clients.get(self.client_key(message))
         if client is None:
-            _log.warning(f"Failed to {action}: outstation {self.client_key(message)} is not registered.")
+            _log.warning(f"Failed to {action}: outstation {remote_id or self.client_key(message)} is not registered.")
         return client
 
     @staticmethod
@@ -70,7 +77,10 @@ class Dnp3Proxy(AsyncioProtocolProxy):
                                                    remote_id=client.remote_id))
 
     @staticmethod
-    def _remote_id(message: dict) -> UUID | None:
+    def _remote_id(headers, message: dict) -> UUID | None:
+        """The caller's id for the outstation: from the header, or from the payload for a version 1 caller."""
+        if (remote_id := getattr(headers, 'remote_id', None)) is not None:
+            return remote_id
         value = message.get('remote_id')
         try:
             return UUID(str(value)) if value else None
@@ -80,7 +90,7 @@ class Dnp3Proxy(AsyncioProtocolProxy):
 
     # ---- endpoints ----------------------------------------------------------------------------------------------
     @callback
-    async def register_outstation_endpoint(self, _, raw_message: bytes):
+    async def register_outstation_endpoint(self, headers, raw_message: bytes):
         """Create or reuse the client for an outstation and replace its point table.
 
         Payload: ``host``, ``port``, ``master_address``, ``outstation_address``, the connection fields
@@ -104,10 +114,12 @@ class Dnp3Proxy(AsyncioProtocolProxy):
                 for field in ('integrity_poll_interval', 'unsolicited', 'unsolicited_classes'):
                     if field in message:
                         setattr(client, field, set(message[field]) if field == 'unsolicited_classes' else message[field])
-            client.remote_id = self._remote_id(message)
+            client.remote_id = self._remote_id(headers, message)
             # A bad point table rejects the whole registration: the client is kept only once its points are good.
             count = client.configure_points(message.get('points') or [])
             self.clients[key] = client
+            if client.remote_id is not None:
+                self.remotes[client.remote_id] = client
             client.start()
             return serialize({'client': key, 'points': count})
         except (KeyError, TypeError, ValueError) as e:
@@ -115,32 +127,34 @@ class Dnp3Proxy(AsyncioProtocolProxy):
             return serialize({}, {'outstation': str(e)})
 
     @callback
-    async def read_points_endpoint(self, _, raw_message: bytes):
+    async def read_points_endpoint(self, headers, raw_message: bytes):
         """Read the outstation (``mode``: class, integrity or points; ``classes`` for a class read) and reply with the
         values of ``topics``: ``result`` maps topic to ``{value, quality, online, timestamp}``."""
         message = self._decode(raw_message)
-        if message is None or (client := self._get_client(message, 'read points')) is None:
+        if message is None or (client := self._get_client(headers, message, 'read points')) is None:
             return serialize({}, {'outstation': 'Outstation not registered.'})
         results, errors = await client.read(message.get('topics') or list(client.points), mode=message.get('mode', 'class'),
                                             classes=message.get('classes') or (0,))
         return serialize(results, errors)
 
     @callback
-    async def write_points_endpoint(self, _, raw_message: bytes):
+    async def write_points_endpoint(self, headers, raw_message: bytes):
         """Operate outputs: ``operations`` are ``{topic, value}``, ``control_mode`` is ``direct`` or ``sbo``."""
         message = self._decode(raw_message)
-        if message is None or (client := self._get_client(message, 'write points')) is None:
+        if message is None or (client := self._get_client(headers, message, 'write points')) is None:
             return serialize({}, {'outstation': 'Outstation not registered.'})
         results, errors = await client.write(message.get('operations') or [], control_mode=message.get('control_mode', 'direct'))
         return serialize(results, errors)
 
     @callback
-    async def close_outstation_endpoint(self, _, raw_message: bytes):
+    async def close_outstation_endpoint(self, headers, raw_message: bytes):
         message = self._decode(raw_message)
         if message is None:
             return serialize({}, {'outstation': 'Undecodable request.'})
-        client = self.clients.pop(self.client_key(message), None)
+        client = self._get_client(headers, message, 'close outstation')
         if client is not None:
+            self.clients = {k: c for k, c in self.clients.items() if c is not client}
+            self.remotes = {k: c for k, c in self.remotes.items() if c is not client}
             await client.close()
         return serialize({'closed': client is not None})
 
