@@ -152,12 +152,12 @@ async def test_proxy_registers_serves_and_closes_an_outstation():
                        {'role': 'outstation', 'host': '127.0.0.1', 'port': 0, 'outstation_address': 4, 'master_address': 3,
                         'points': SERVED_POINTS, 'values': {'s/ai1': 11, 's/ai0': 0}}, remote=remote)
     key = 'outstation:127.0.0.1:0:4'
-    assert reply == {'result': {'server': key, 'points': len(SERVED_POINTS), 'role': 'outstation', 'seeded': 1}, 'error': {}}
+    assert reply == {'result': {'server': key, 'points': len(SERVED_POINTS), 'role': 'outstation', 'seeded': 2}, 'error': {}}
     served = proxy.servers[key]
     assert proxy.remotes[remote] is served and served.runner.is_running
     await asyncio.sleep(0.05)
     assert pushes and pushes[0][0] == remote and pushes[0][1]['s/ctr0'] == 42       # the table, pushed on registration
-    assert pushes[0][1]['s/ai1'] == 11 and pushes[0][1]['s/ai0'] == pytest.approx(240.1)   # seeded, and kept
+    assert pushes[0][1]['s/ai1'] == 11 and pushes[0][1]['s/ai0'] == 0      # the caller's values beat the starting values
 
     reply = await call(proxy, proxy.read_points_endpoint, {'mode': 'class', 'topics': ['s/ai0']}, remote=remote)
     assert reply['result']['s/ai0']['value'] == pytest.approx(240.1)
