@@ -91,7 +91,7 @@ async def test_push_sends_receive_unsolicited_to_the_manager_tagged_with_the_rem
     assert message.remote_id == remote and message.protocol_version == 2
     assert json.loads(message.payload) == {'result': {'d/ai0': 5.5}, 'error': {}}
     await proxy._push(mock.Mock(remote_id=None), {'d/ai0': 1})                  # a caller that gave no remote id
-    assert proxy.send.await_args.args[1].remote_id is None and proxy.send.await_args.args[1].protocol_version == 1
+    assert proxy.send.await_args.args[1].remote_id is None and proxy.send.await_args.args[1].protocol_version == 2
 
 
 async def test_registration_records_the_remote_id(served):
