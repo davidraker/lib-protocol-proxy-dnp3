@@ -1,10 +1,14 @@
-"""The DNP3 protocol proxy: a process holding dnp3py masters for any number of outstations.
+"""The DNP3 protocol proxy: a process holding dnp3py masters for any number of outstations, and dnp3py outstations
+served to remote masters, in either role as the registration says.
 
-Everything about an outstation arrives in messages (REGISTER_OUTSTATION), so the proxy takes no launch options. The
-registering caller's remote id (header version 2) identifies the outstation in every later message; the caller and the
-proxy are always installed together, so there is no payload fallback. Reads and writes are keyed by the full
-point topics the caller registered, and unsolicited values are pushed back to the manager as RECEIVE_UNSOLICITED,
-tagged with the remote id and keyed the same way.
+Everything about a remote arrives in messages (REGISTER_REMOTE, or its older name REGISTER_OUTSTATION), so the proxy
+takes no launch options. ``role`` is ``master`` (the default; ``client`` is accepted) to reach an outstation, or
+``outstation`` (``server``) to serve one. The registering caller's remote id (header version 2) identifies the remote in
+every later message; the caller and the proxy are always installed together, so there is no payload fallback. Reads and
+writes are keyed by the full point topics the caller registered and mean the same in both roles (what the proxy holds
+for the point; store this value), and values the other side produced (unsolicited responses from an outstation, a
+master's controls on a served outstation) are pushed back to the manager as RECEIVE_UNSOLICITED, tagged with the remote
+id and keyed the same way. A served outstation also pushes its whole table when it is (re)registered.
 """
 import asyncio
 import json
@@ -18,11 +22,15 @@ from protocol_proxy.proxy.asyncio import AsyncioProtocolProxy
 
 from .client import OutstationClient
 from .json import serialize
+from .server import ServedOutstation
 
 _log = logging.getLogger(__name__)
 
 IDENTITY_FIELDS = ('host', 'port', 'master_address', 'outstation_address')
 CONNECTION_FIELDS = ('response_timeout', 'link_reset', 'integrity_poll_interval', 'unsolicited', 'unsolicited_classes')
+ROLES = {'master': 'master', 'client': 'master', 'outstation': 'outstation', 'server': 'outstation'}
+
+Remote = OutstationClient | ServedOutstation
 
 
 class Dnp3Proxy(AsyncioProtocolProxy):
@@ -32,15 +40,16 @@ class Dnp3Proxy(AsyncioProtocolProxy):
 
     def __init__(self, callback_timeout: float = DEFAULT_CALLBACK_TIMEOUT, **kwargs):
         super(Dnp3Proxy, self).__init__(**kwargs)
-        self.clients: dict[str, OutstationClient] = {}
-        self.remotes: dict[UUID, OutstationClient] = {}      # by the caller's remote id (header version 2)
+        self.clients: dict[str, OutstationClient] = {}       # masters, by outstation address
+        self.servers: dict[str, ServedOutstation] = {}       # served outstations, by listener and address
+        self.remotes: dict[UUID, Remote] = {}                # either, by the caller's remote id (header version 2)
         self.loop = asyncio.get_event_loop()
-        self.register_callback(self.register_outstation_endpoint, 'REGISTER_OUTSTATION', provides_response=True,
-                               timeout=callback_timeout)
+        for name in ('REGISTER_REMOTE', 'REGISTER_OUTSTATION'):
+            self.register_callback(self.register_outstation_endpoint, name, provides_response=True, timeout=callback_timeout)
         self.register_callback(self.read_points_endpoint, 'READ_POINTS', provides_response=True, timeout=callback_timeout)
         self.register_callback(self.write_points_endpoint, 'WRITE_POINTS', provides_response=True, timeout=callback_timeout)
-        self.register_callback(self.close_outstation_endpoint, 'CLOSE_OUTSTATION', provides_response=True,
-                               timeout=callback_timeout)
+        for name in ('CLOSE_REMOTE', 'CLOSE_OUTSTATION'):
+            self.register_callback(self.close_outstation_endpoint, name, provides_response=True, timeout=callback_timeout)
 
     # ---- helpers ------------------------------------------------------------------------------------------------
     @staticmethod
@@ -48,8 +57,13 @@ class Dnp3Proxy(AsyncioProtocolProxy):
         return (f"{message.get('host')}:{message.get('port', 20000)}:{message.get('outstation_address', 1)}"
                 f":{message.get('master_address', 2)}")
 
-    def _get_client(self, headers, message: dict, action: str) -> OutstationClient | None:
-        """The outstation a request concerns, by the remote id in its header."""
+    @staticmethod
+    def server_key(message: dict) -> str:
+        return (f"outstation:{message.get('host', '0.0.0.0')}:{message.get('port', 20000)}"
+                f":{message.get('outstation_address', 1)}")
+
+    def _get_client(self, headers, message: dict, action: str) -> Remote | None:
+        """The remote (a master's outstation, or a served outstation) a request concerns, by its header's remote id."""
         remote_id = getattr(headers, 'remote_id', None)
         client = self.remotes.get(remote_id) if remote_id else None
         if client is None:
@@ -65,9 +79,9 @@ class Dnp3Proxy(AsyncioProtocolProxy):
             return None
         return message if isinstance(message, dict) else None
 
-    async def _push(self, client: OutstationClient, values: dict[str, Any]):
-        """Send unsolicited values to the manager, fire-and-forget, keyed by the registered topics and tagged with the
-        outstation's remote id so the manager routes them to the caller that registered it."""
+    async def _push(self, client: Remote, values: dict[str, Any]):
+        """Send values the other side produced to the manager, fire-and-forget, keyed by the registered topics and
+        tagged with the remote's id so the manager routes them to the caller that registered it."""
         peer = self.peers.get(self.manager)
         if peer is None:    # pragma: no cover - the manager peer is created by the base constructor
             return
@@ -82,19 +96,29 @@ class Dnp3Proxy(AsyncioProtocolProxy):
     # ---- endpoints ----------------------------------------------------------------------------------------------
     @callback
     async def register_outstation_endpoint(self, headers, raw_message: bytes):
-        """Create or reuse the client for an outstation and replace its point table.
+        """Register a remote in either role and replace its point table (REGISTER_REMOTE / REGISTER_OUTSTATION).
 
-        Payload: ``host``, ``port``, ``master_address``, ``outstation_address``, the connection fields
-        (``response_timeout``, ``link_reset``, ``integrity_poll_interval``, ``unsolicited``, ``unsolicited_classes``)
-        and ``points``, a list of ``{topic, group, variation, index, scaling, control_code, count, on_time, off_time}``.
-        Reply: ``{'client': key, 'points': n}``.
+        Payload: ``role`` (``master`` by default, or ``outstation``), ``host``, ``port``, ``master_address``,
+        ``outstation_address``, the connection fields (``response_timeout``, ``link_reset``,
+        ``integrity_poll_interval``, ``unsolicited``, ``unsolicited_classes``; a served outstation uses the last two)
+        and ``points``, a list of ``{topic, group, variation, index, scaling, control_code, count, on_time, off_time}``
+        plus, for a served outstation, ``event_class``, ``remote_writable`` and ``initial_value``.
+        Reply: ``{'client': key, 'points': n}`` for a master, ``{'server': key, 'points': n, 'role': 'outstation'}``
+        for a served outstation, which also pushes its whole table.
         """
         message = self._decode(raw_message)
-        if message is None or not message.get('host'):
-            return serialize({}, {'outstation': 'REGISTER_OUTSTATION needs at least a host.'})
+        if message is None:
+            return serialize({}, {'outstation': 'Undecodable registration.'})
+        role = ROLES.get(str(message.get('role') or 'master').lower())
+        if role is None:
+            return serialize({}, {'outstation': f"Unknown role {message.get('role')!r}; expected master or outstation."})
         remote_id = self._remote_id(headers)
         if remote_id is None:
-            return serialize({}, {'outstation': 'REGISTER_OUTSTATION needs the remote id in its header (version 2).'})
+            return serialize({}, {'outstation': 'Registration needs the remote id in its header (version 2).'})
+        if role == 'outstation':
+            return await self._register_served(remote_id, message)
+        if not message.get('host'):
+            return serialize({}, {'outstation': 'Registering an outstation to reach needs at least a host.'})
         key = self.client_key(message)
         try:
             client = self.clients.get(key)
@@ -119,10 +143,35 @@ class Dnp3Proxy(AsyncioProtocolProxy):
             _log.warning(f'Failed to register outstation {key}: {e}')
             return serialize({}, {'outstation': str(e)})
 
+    async def _register_served(self, remote_id: UUID, message: dict):
+        key = self.server_key(message)
+        served = self.servers.get(key)
+        try:
+            if served is None:
+                served = ServedOutstation(message.get('host', '0.0.0.0'), int(message.get('port', 20000)),
+                                          outstation_address=int(message.get('outstation_address', 1)),
+                                          master_address=int(message.get('master_address', 2)),
+                                          unsolicited=bool(message.get('unsolicited', False)),
+                                          unsolicited_classes=message.get('unsolicited_classes') or (1, 2, 3))
+                served.push = partial(self._push, served)
+            served.remote_id = remote_id
+            count = served.configure_points(message.get('points') or [])
+            await served.start()
+        except Exception as e:      # a bad row, or whatever the listener's bind raised (dnp3py's ChannelError, OSError)
+            _log.warning(f'Failed to serve outstation {key}: {e}')
+            if served is not None and key not in self.servers:
+                await served.close()
+            return serialize({}, {'outstation': str(e)})
+        self.servers[key] = served
+        self.remotes[remote_id] = served
+        self.loop.create_task(served.push_all())        # the platform gets the whole served table
+        return serialize({'server': key, 'points': count, 'role': 'outstation'})
+
     @callback
     async def read_points_endpoint(self, headers, raw_message: bytes):
         """Read the outstation (``mode``: class, integrity or points; ``classes`` for a class read) and reply with the
-        values of ``topics``: ``result`` maps topic to ``{value, quality, online, timestamp}``."""
+        values of ``topics``: ``result`` maps topic to ``{value, quality, online, timestamp}``. For a served
+        outstation the values are the ones it holds; ``mode`` and ``classes`` are ignored."""
         message = self._decode(raw_message)
         if message is None or (client := self._get_client(headers, message, 'read points')) is None:
             return serialize({}, {'outstation': 'Outstation not registered.'})
@@ -132,7 +181,8 @@ class Dnp3Proxy(AsyncioProtocolProxy):
 
     @callback
     async def write_points_endpoint(self, headers, raw_message: bytes):
-        """Operate outputs: ``operations`` are ``{topic, value}``, ``control_mode`` is ``direct`` or ``sbo``."""
+        """Operate outputs: ``operations`` are ``{topic, value}``, ``control_mode`` is ``direct`` or ``sbo``. For a
+        served outstation the operations set its served values (any registered point) and ``control_mode`` is ignored."""
         message = self._decode(raw_message)
         if message is None or (client := self._get_client(headers, message, 'write points')) is None:
             return serialize({}, {'outstation': 'Outstation not registered.'})
@@ -147,6 +197,7 @@ class Dnp3Proxy(AsyncioProtocolProxy):
         client = self._get_client(headers, message, 'close outstation')
         if client is not None:
             self.clients = {k: c for k, c in self.clients.items() if c is not client}
+            self.servers = {k: c for k, c in self.servers.items() if c is not client}
             self.remotes = {k: c for k, c in self.remotes.items() if c is not client}
             await client.close()
         return serialize({'closed': client is not None})

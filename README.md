@@ -47,6 +47,28 @@ timestamp}` with `scaling` applied (engineering value = raw value times scaling)
 writes, `result` maps topic to `{status: "SUCCESS", value}` and `error` carries the status the outstation echoed
 (`status NOT_SUPPORTED`) or why nothing was sent.
 
+## Outstation role
+
+A registration whose `role` is `outstation` (or `server`) makes the proxy *serve* an outstation instead of reaching one:
+a dnp3py `Outstation` on `host:port` (the listener, `0.0.0.0` by default) with the given `outstation_address`, answering
+the master at `master_address`. Its point table holds the served values, which the master reads with class, integrity
+or range polls. Each point row takes, besides the usual columns, `event_class` (1 to 3, or 0; changes of the point are
+buffered in that class and collected by the master's event polls; analog outputs raise no events in dnp3py),
+`remote_writable` (whether the master may operate the point; outputs by default) and `initial_value` (the value to hold
+until something writes it; a point without one reports quality RESTART until then).
+
+In this role the same messages mean: `WRITE_POINTS` stores served values (`control_mode` is ignored; every registered
+point may be written), `READ_POINTS` reports the held values, and `RECEIVE_UNSOLICITED` carries the master's accepted
+controls, tagged with the remote id, so the caller sees a write from the master at once. A master's control on an
+unregistered point is answered NOT_SUPPORTED and on a point that is not remote-writable BLOCKED. On every
+(re)registration the proxy pushes the whole served table (the points that hold a value), which is how the caller is
+brought up to date after a restart on either side. Re-registering with the same listener and address keeps the listener
+open and replaces the point table, keeping the values of points that stay.
+
+dnp3py's `OutstationTcpRunner` does not transmit unsolicited responses on its own, so a served outstation answers polls
+(including event polls) but does not initiate reports; `unsolicited` and `unsolicited_classes` only decide which
+classes the outstation lets a master enable.
+
 ## Unsolicited responses
 
 With `unsolicited` true the proxy enables the named classes after its startup integrity poll, listens for events whenever
