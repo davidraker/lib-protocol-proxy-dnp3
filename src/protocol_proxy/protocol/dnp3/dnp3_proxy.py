@@ -9,6 +9,7 @@ import json
 import logging
 from functools import partial
 from typing import Any
+from uuid import UUID
 
 from protocol_proxy.ipc import callback, ProtocolProxyMessage
 from protocol_proxy.proxy.asyncio import AsyncioProtocolProxy
@@ -59,12 +60,23 @@ class Dnp3Proxy(AsyncioProtocolProxy):
             return None
         return message if isinstance(message, dict) else None
 
-    async def _push(self, values: dict[str, Any]):
-        """Send unsolicited values to the manager, fire-and-forget, keyed by the registered topics."""
+    async def _push(self, client: OutstationClient, values: dict[str, Any]):
+        """Send unsolicited values to the manager, fire-and-forget, keyed by the registered topics and tagged with the
+        outstation's remote id so the manager routes them to the caller that registered it."""
         peer = self.peers.get(self.manager)
         if peer is None:    # pragma: no cover - the manager peer is created by the base constructor
             return
-        await self.send(peer, ProtocolProxyMessage(method_name='RECEIVE_UNSOLICITED', payload=serialize(values)))
+        await self.send(peer, ProtocolProxyMessage(method_name='RECEIVE_UNSOLICITED', payload=serialize(values),
+                                                   remote_id=client.remote_id))
+
+    @staticmethod
+    def _remote_id(message: dict) -> UUID | None:
+        value = message.get('remote_id')
+        try:
+            return UUID(str(value)) if value else None
+        except ValueError:
+            _log.warning(f'Ignoring malformed remote_id {value!r}')
+            return None
 
     # ---- endpoints ----------------------------------------------------------------------------------------------
     @callback
@@ -86,12 +98,13 @@ class Dnp3Proxy(AsyncioProtocolProxy):
                 connection = {k: message[k] for k in CONNECTION_FIELDS if k in message}
                 client = OutstationClient(message['host'], int(message.get('port', 20000)),
                                           master_address=int(message.get('master_address', 2)),
-                                          outstation_address=int(message.get('outstation_address', 1)),
-                                          push=self._push, **connection)
+                                          outstation_address=int(message.get('outstation_address', 1)), **connection)
+                client.push = partial(self._push, client)
             else:
                 for field in ('integrity_poll_interval', 'unsolicited', 'unsolicited_classes'):
                     if field in message:
                         setattr(client, field, set(message[field]) if field == 'unsolicited_classes' else message[field])
+            client.remote_id = self._remote_id(message)
             # A bad point table rejects the whole registration: the client is kept only once its points are good.
             count = client.configure_points(message.get('points') or [])
             self.clients[key] = client

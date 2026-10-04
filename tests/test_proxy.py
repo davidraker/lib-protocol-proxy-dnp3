@@ -80,11 +80,28 @@ async def test_unknown_outstation_and_bad_registration(served):
     assert 'not a point the proxy reads' in reply['error']['outstation'] and proxy.clients == {}
 
 
-async def test_push_sends_receive_unsolicited_to_the_manager():
+async def test_push_sends_receive_unsolicited_to_the_manager_tagged_with_the_remote():
     proxy = make_proxy()
     proxy.send = mock.AsyncMock(return_value=True)
-    await proxy._push({'d/ai0': 5.5})
+    remote = uuid4()
+    await proxy._push(mock.Mock(remote_id=remote), {'d/ai0': 5.5})
     peer, message = proxy.send.await_args.args
     assert peer is proxy.peers[proxy.manager]
     assert message.method_name == 'RECEIVE_UNSOLICITED' and message.response_expected is False
+    assert message.remote_id == remote and message.protocol_version == 2
     assert json.loads(message.payload) == {'result': {'d/ai0': 5.5}, 'error': {}}
+    await proxy._push(mock.Mock(remote_id=None), {'d/ai0': 1})                  # a caller that gave no remote id
+    assert proxy.send.await_args.args[1].remote_id is None and proxy.send.await_args.args[1].protocol_version == 1
+
+
+async def test_registration_records_the_remote_id(served):
+    proxy = make_proxy()
+    remote = uuid4()
+    reply = await call(proxy, proxy.register_outstation_endpoint, {**identity(served), 'integrity_poll_interval': 0,
+                                                                   'points': POINTS, 'remote_id': remote.hex})
+    assert reply['error'] == {}
+    client = proxy.clients[reply['result']['client']]
+    assert client.remote_id == remote and client.push.func == proxy._push and client.push.args == (client,)
+    reply = await call(proxy, proxy.register_outstation_endpoint, {**identity(served), 'points': POINTS, 'remote_id': 'nonsense'})
+    assert reply['error'] == {} and client.remote_id is None                      # malformed: ignored, not fatal
+    await call(proxy, proxy.close_outstation_endpoint, identity(served))

@@ -92,7 +92,7 @@ class OutstationClient:
                  response_timeout: float = 5.0, link_reset: bool = True, integrity_poll_interval: float = 3600.0,
                  unsolicited: bool = False, unsolicited_classes: Iterable[int] = (1, 2, 3),
                  push: PushCallback | None = None, listen_slice: float = 0.5, reconnect_delay: float = 5.0,
-                 channel=None):
+                 channel=None, remote_id=None):
         self.host, self.port = host, port
         self.cache = PointCache()
         self.master = Master(config=MasterConfig(address=master_address, outstation_address=outstation_address,
@@ -104,6 +104,8 @@ class OutstationClient:
         self.unsolicited = bool(unsolicited)
         self.unsolicited_classes = {int(c) for c in unsolicited_classes}
         self.push = push
+        # The caller's identifier for this outstation, carried in pushed messages so the manager routes them to it.
+        self.remote_id = remote_id
         self.listen_slice, self.reconnect_delay = listen_slice, reconnect_delay
         self.points: dict[str, PointSpec] = {}
         self._topics_by_key: dict[tuple[PointKind, int], list[str]] = {}
