@@ -1,8 +1,8 @@
 """The DNP3 protocol proxy: a process holding dnp3py masters for any number of outstations.
 
 Everything about an outstation arrives in messages (REGISTER_OUTSTATION), so the proxy takes no launch options. The
-registering caller's remote id (header version 2) identifies the outstation in every later message; callers without
-one (header version 1) name it with the identity fields in the payload instead. Reads and writes are keyed by the full
+registering caller's remote id (header version 2) identifies the outstation in every later message; the caller and the
+proxy are always installed together, so there is no payload fallback. Reads and writes are keyed by the full
 point topics the caller registered, and unsolicited values are pushed back to the manager as RECEIVE_UNSOLICITED,
 tagged with the remote id and keyed the same way.
 """
@@ -49,13 +49,11 @@ class Dnp3Proxy(AsyncioProtocolProxy):
                 f":{message.get('master_address', 2)}")
 
     def _get_client(self, headers, message: dict, action: str) -> OutstationClient | None:
-        """The outstation a request concerns: the header's remote id first, the payload's identity fields otherwise."""
+        """The outstation a request concerns, by the remote id in its header."""
         remote_id = getattr(headers, 'remote_id', None)
         client = self.remotes.get(remote_id) if remote_id else None
-        if client is None and message.get('host'):
-            client = self.clients.get(self.client_key(message))
         if client is None:
-            _log.warning(f"Failed to {action}: outstation {remote_id or self.client_key(message)} is not registered.")
+            _log.warning(f"Failed to {action}: remote {remote_id} has no registered outstation.")
         return client
 
     @staticmethod
@@ -77,16 +75,9 @@ class Dnp3Proxy(AsyncioProtocolProxy):
                                                    remote_id=client.remote_id))
 
     @staticmethod
-    def _remote_id(headers, message: dict) -> UUID | None:
-        """The caller's id for the outstation: from the header, or from the payload for a version 1 caller."""
-        if (remote_id := getattr(headers, 'remote_id', None)) is not None:
-            return remote_id
-        value = message.get('remote_id')
-        try:
-            return UUID(str(value)) if value else None
-        except ValueError:
-            _log.warning(f'Ignoring malformed remote_id {value!r}')
-            return None
+    def _remote_id(headers) -> UUID | None:
+        """The caller's id for the outstation, from the header."""
+        return getattr(headers, 'remote_id', None)
 
     # ---- endpoints ----------------------------------------------------------------------------------------------
     @callback
@@ -101,6 +92,9 @@ class Dnp3Proxy(AsyncioProtocolProxy):
         message = self._decode(raw_message)
         if message is None or not message.get('host'):
             return serialize({}, {'outstation': 'REGISTER_OUTSTATION needs at least a host.'})
+        remote_id = self._remote_id(headers)
+        if remote_id is None:
+            return serialize({}, {'outstation': 'REGISTER_OUTSTATION needs the remote id in its header (version 2).'})
         key = self.client_key(message)
         try:
             client = self.clients.get(key)
@@ -114,12 +108,11 @@ class Dnp3Proxy(AsyncioProtocolProxy):
                 for field in ('integrity_poll_interval', 'unsolicited', 'unsolicited_classes'):
                     if field in message:
                         setattr(client, field, set(message[field]) if field == 'unsolicited_classes' else message[field])
-            client.remote_id = self._remote_id(headers, message)
+            client.remote_id = remote_id
             # A bad point table rejects the whole registration: the client is kept only once its points are good.
             count = client.configure_points(message.get('points') or [])
             self.clients[key] = client
-            if client.remote_id is not None:
-                self.remotes[client.remote_id] = client
+            self.remotes[remote_id] = client
             client.start()
             return serialize({'client': key, 'points': count})
         except (KeyError, TypeError, ValueError) as e:
