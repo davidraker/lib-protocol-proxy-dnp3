@@ -32,8 +32,7 @@ python -m protocol_proxy.proxy protocol_proxy.protocol.dnp3.dnp3_proxy:Dnp3Proxy
 
 The DNP3 proxy takes no protocol-specific launch options. Everything about an outstation arrives in messages, and every
 point is identified by the topic the caller registered it under. The caller's remote id (protocol-proxy header version 2)
-identifies the outstation in every message after `REGISTER_OUTSTATION`; a version 1 caller names it with `host`, `port`,
-`master_address` and `outstation_address` in the payload instead:
+identifies the outstation in every message after `REGISTER_OUTSTATION`:
 
 | Message | Purpose |
 |---|---|
