@@ -103,8 +103,8 @@ class Dnp3Proxy(AsyncioProtocolProxy):
         ``integrity_poll_interval``, ``unsolicited``, ``unsolicited_classes``; a served outstation uses the last two)
         and ``points``, a list of ``{topic, group, variation, index, scaling, control_code, count, on_time, off_time}``
         plus, for a served outstation, ``event_class``, ``remote_writable`` and ``initial_value``; a served outstation
-        may also get ``values`` (``{topic: value}``, the caller's current values), applied to points it holds no value
-        for yet. Reply: ``{'client': key, 'points': n}`` for a master, ``{'server': key, 'points': n, 'role':
+        may also get ``values`` (``{topic: value}``, the caller's current values), which seed new points ahead of
+        their ``initial_value``; values the proxy already holds win. Reply: ``{'client': key, 'points': n}`` for a master, ``{'server': key, 'points': n, 'role':
         'outstation', 'seeded': m}`` for a served outstation, which also pushes its whole table.
         """
         message = self._decode(raw_message)
@@ -156,8 +156,7 @@ class Dnp3Proxy(AsyncioProtocolProxy):
                                           unsolicited_classes=message.get('unsolicited_classes') or (1, 2, 3))
                 served.push = partial(self._push, served)
             served.remote_id = remote_id
-            count = served.configure_points(message.get('points') or [])
-            seeded = served.seed(message.get('values') or {})
+            count = served.configure_points(message.get('points') or [], message.get('values') or {})
             await served.start()
         except Exception as e:      # a bad row, or whatever the listener's bind raised (dnp3py's ChannelError, OSError)
             _log.warning(f'Failed to serve outstation {key}: {e}')
@@ -167,7 +166,7 @@ class Dnp3Proxy(AsyncioProtocolProxy):
         self.servers[key] = served
         self.remotes[remote_id] = served
         self.loop.create_task(served.push_all())        # the platform gets the whole served table
-        return serialize({'server': key, 'points': count, 'role': 'outstation', 'seeded': seeded})
+        return serialize({'server': key, 'points': count, 'role': 'outstation', 'seeded': served.seeded})
 
     @callback
     async def read_points_endpoint(self, headers, raw_message: bytes):
