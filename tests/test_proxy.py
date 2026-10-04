@@ -1,5 +1,6 @@
 """Every endpoint through the real IPC base class, with the proxy constructed but never registered."""
 import json
+from types import SimpleNamespace
 from unittest import mock
 from uuid import uuid4
 
@@ -17,9 +18,11 @@ def make_proxy() -> Dnp3Proxy:
                      manager_token=uuid4(), registration_retry_delay=0, registration_timeout=0.05)
 
 
-async def call(proxy, endpoint, message: dict) -> dict:
-    """Invoke an endpoint the way the IPC layer does, past the peer-authentication wrapper."""
-    reply = await endpoint.__wrapped__(proxy, None, json.dumps(message).encode('utf8'))
+async def call(proxy, endpoint, message: dict, remote=None) -> dict:
+    """Invoke an endpoint the way the IPC layer does, past the peer-authentication wrapper. ``remote`` is the header's
+    remote id (version 2); None is a version 1 caller that names the outstation in the payload."""
+    headers = SimpleNamespace(remote_id=remote)
+    reply = await endpoint.__wrapped__(proxy, headers, json.dumps(message).encode('utf8'))
     return json.loads(reply)
 
 
@@ -94,14 +97,32 @@ async def test_push_sends_receive_unsolicited_to_the_manager_tagged_with_the_rem
     assert proxy.send.await_args.args[1].remote_id is None and proxy.send.await_args.args[1].protocol_version == 2
 
 
-async def test_registration_records_the_remote_id(served):
+async def test_remote_id_from_the_header_identifies_the_outstation_in_later_requests(served):
     proxy = make_proxy()
     remote = uuid4()
     reply = await call(proxy, proxy.register_outstation_endpoint, {**identity(served), 'integrity_poll_interval': 0,
-                                                                   'points': POINTS, 'remote_id': remote.hex})
+                                                                   'points': POINTS}, remote=remote)
     assert reply['error'] == {}
     client = proxy.clients[reply['result']['client']]
-    assert client.remote_id == remote and client.push.func == proxy._push and client.push.args == (client,)
+    assert client.remote_id == remote and proxy.remotes[remote] is client
+    assert client.push.func == proxy._push and client.push.args == (client,)
+    # Later requests carry no identity fields: the header's remote id finds the outstation.
+    reply = await call(proxy, proxy.read_points_endpoint, {'mode': 'integrity', 'topics': ['d/ai0']}, remote=remote)
+    assert reply['error'] == {} and reply['result']['d/ai0']['value'] == 2401.0
+    reply = await call(proxy, proxy.write_points_endpoint, {'operations': [{'topic': 'd/ao1', 'value': 1.5}]}, remote=remote)
+    assert reply['result']['d/ao1']['status'] == 'SUCCESS'
+    reply = await call(proxy, proxy.read_points_endpoint, {'topics': ['d/ai0']}, remote=uuid4())    # unknown remote, no payload identity
+    assert reply['error'] == {'outstation': 'Outstation not registered.'}
+    reply = await call(proxy, proxy.close_outstation_endpoint, {}, remote=remote)
+    assert reply == {'result': {'closed': True}, 'error': {}} and proxy.clients == {} and proxy.remotes == {}
+
+
+async def test_version_1_callers_name_the_outstation_in_the_payload(served):
+    proxy = make_proxy()
     reply = await call(proxy, proxy.register_outstation_endpoint, {**identity(served), 'points': POINTS, 'remote_id': 'nonsense'})
-    assert reply['error'] == {} and client.remote_id is None                      # malformed: ignored, not fatal
+    assert reply['error'] == {}
+    client = proxy.clients[reply['result']['client']]
+    assert client.remote_id is None and proxy.remotes == {}                    # malformed: ignored, not fatal
+    reply = await call(proxy, proxy.register_outstation_endpoint, {**identity(served), 'points': POINTS, 'remote_id': uuid4().hex})
+    assert client.remote_id is not None and proxy.remotes[client.remote_id] is client   # payload id, version 1 style
     await call(proxy, proxy.close_outstation_endpoint, identity(served))
