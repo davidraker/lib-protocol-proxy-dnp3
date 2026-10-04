@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "protocol-proxy-dnp3"
-version = "2.0.0rc0"
+version = "2.0.0rc1"
 description = "A DNP3 (IEEE 1815) master Protocol Proxy built on dnp3py."
 authors = ["The VOLTTRON Development Team <volttron@pnnl.gov>"]
 license = "Apache-2.0"
