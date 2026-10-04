@@ -157,6 +157,7 @@ class ServedOutstation:
         self.remote_id = remote_id
         self.points: dict[str, ServedPoint] = {}
         self._by_key: dict[tuple[PointKind, int], ServedPoint] = {}
+        self.seeded = 0
         self.database = Database(config=DatabaseConfig(
             max_binary_inputs=MAX_POINTS_PER_KIND, max_binary_outputs=MAX_POINTS_PER_KIND,
             max_analog_inputs=MAX_POINTS_PER_KIND, max_analog_outputs=MAX_POINTS_PER_KIND,
@@ -171,13 +172,18 @@ class ServedOutstation:
         self._task: asyncio.Task | None = None
 
     # ---- configuration ------------------------------------------------------------------------------------------
-    def configure_points(self, specs: Iterable[dict]) -> int:
+    def configure_points(self, specs: Iterable[dict], values: dict[str, Any] | None = None) -> int:
         """Replace the point table, keeping the served values of points that stay. A bad row rejects the whole table.
 
-        New points start from their ``initial_value`` when the row gives one (quality ONLINE), otherwise from the
-        kind's zero with quality RESTART, which is how an outstation reports a value nobody has set yet.
+        A new point starts from the caller's current value for it in ``values`` (the platform's equipment tree, sent
+        with the registration, so a proxy that restarted takes the served values back from the platform's memory),
+        else from the row's ``initial_value``, else from the kind's zero with quality RESTART, which is how an
+        outstation reports a value nobody has set yet. Values this process already holds win over both. The number of
+        points seeded from ``values`` is left in ``seeded``.
         """
+        values = values or {}
         points = [ServedPoint.from_dict(spec) for spec in specs]
+        self.seeded = 0
         by_key: dict[tuple[PointKind, int], ServedPoint] = {}
         for point in points:
             if point.key in by_key:
@@ -195,35 +201,27 @@ class ServedOutstation:
                 config = held.config(event_class=event_class)
                 if point.index in store:
                     store[point.index].config = config
-                elif point.initial_value in (None, ''):
+                    continue
+                initial = point.initial_value
+                if point.topic in values and held.updater is not None:
+                    try:
+                        initial = point.raw_typed(values[point.topic])
+                        self.seeded += 1
+                    except (TypeError, ValueError) as e:
+                        _log.warning(f'{self.host}:{self.port}: ignoring seed value {values[point.topic]!r} for'
+                                     f' {point.topic}: {e}')
+                        initial = None if initial in (None, '') else point.raw_typed(initial)
+                elif initial not in (None, ''):
+                    initial = point.raw_typed(initial)
+                else:
+                    initial = None
+                if initial is None:
                     getattr(self.database, held.adder)(point.index, config)
                 else:
-                    getattr(self.database, held.adder)(point.index, config, value=point.raw_typed(point.initial_value),
-                                                       quality=held.quality.ONLINE)
+                    getattr(self.database, held.adder)(point.index, config, value=initial, quality=held.quality.ONLINE)
         self.points = {p.topic: p for p in points}
         self._by_key = by_key
         return len(self.points)
-
-    def seed(self, values: dict[str, Any]) -> int:
-        """Take the caller's current values for points this outstation holds no value for yet (quality not ONLINE).
-
-        The platform sends its equipment tree's values with the registration, so a proxy that restarted gets the served
-        values back from the platform's memory; values this process already holds (a platform restart) win.
-        """
-        seeded = 0
-        for topic, value in values.items():
-            spec = self.points.get(topic)
-            if spec is None or spec.held.updater is None:
-                continue
-            point = self._point(spec)
-            if point is None or int(point.quality) & 0x01:
-                continue
-            try:
-                self.store(spec, spec.raw_typed(value))
-                seeded += 1
-            except (TypeError, ValueError) as e:
-                _log.warning(f'{self.host}:{self.port}: ignoring seed value {value!r} for {topic}: {e}')
-        return seeded
 
     def spec_at(self, kind: PointKind, index: int) -> ServedPoint | None:
         return self._by_key.get((kind, index))

@@ -88,12 +88,20 @@ async def test_push_all_carries_the_set_values_only(served):
     assert served.pushes.values == [values]
 
 
-async def test_seed_fills_only_unset_points(served):
-    assert served.seed({'s/ai1': 5, 's/ai0': 1.0, 's/bi0': False, 's/zz': 3, 's/ai2': 'x'}) == 1
-    results, _ = await served.read(['s/ai1', 's/ai0', 's/bi0'])
-    assert results['s/ai1']['value'] == 5 and results['s/ai1']['online'] is True       # was unset: seeded
-    assert results['s/ai0']['value'] == pytest.approx(240.1) and results['s/bi0']['value'] is True   # held: kept
-    assert served.seed({'s/ai1': 9}) == 0 and served.pushes.values == []
+async def test_registration_values_seed_new_points_ahead_of_starting_values(served):
+    # Points already held keep their values; new points take the caller's value over the row's initial_value.
+    assert served.configure_points(SERVED_POINTS + [{'topic': 's/new', 'group': 30, 'index': 9, 'initial_value': 1}],
+                                   {'s/ai0': 1.0, 's/new': 5, 's/zz': 3}) == len(SERVED_POINTS) + 1
+    assert served.seeded == 1
+    results, _ = await served.read(['s/ai0', 's/new'])
+    assert results['s/ai0']['value'] == pytest.approx(240.1) and results['s/new']['value'] == 5
+    fresh = ServedOutstation('127.0.0.1', 0)
+    assert fresh.configure_points(SERVED_POINTS, {'s/ai0': 1.0, 's/ai1': 'x', 's/bi0': 'off'}) == len(SERVED_POINTS)
+    assert fresh.seeded == 2                                                             # 'x' is not a number: ignored
+    results, _ = await fresh.read(['s/ai0', 's/ai1', 's/bi0', 's/ao0'])
+    assert results['s/ai0']['value'] == pytest.approx(1.0) and results['s/bi0']['value'] is False
+    assert results['s/ai1']['online'] is False and results['s/ao0']['value'] == 100.0    # no seed: starting value
+    assert served.pushes.values == []
 
 
 async def test_reconfiguration_keeps_values_of_points_that_stay(served):
