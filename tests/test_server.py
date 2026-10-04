@@ -88,6 +88,14 @@ async def test_push_all_carries_the_set_values_only(served):
     assert served.pushes.values == [values]
 
 
+async def test_seed_fills_only_unset_points(served):
+    assert served.seed({'s/ai1': 5, 's/ai0': 1.0, 's/bi0': False, 's/zz': 3, 's/ai2': 'x'}) == 1
+    results, _ = await served.read(['s/ai1', 's/ai0', 's/bi0'])
+    assert results['s/ai1']['value'] == 5 and results['s/ai1']['online'] is True       # was unset: seeded
+    assert results['s/ai0']['value'] == pytest.approx(240.1) and results['s/bi0']['value'] is True   # held: kept
+    assert served.seed({'s/ai1': 9}) == 0 and served.pushes.values == []
+
+
 async def test_reconfiguration_keeps_values_of_points_that_stay(served):
     await served.write([{'topic': 's/ai1', 'value': 3}])
     count = served.configure_points(SERVED_POINTS[:2] + [{'topic': 's/new', 'group': 30, 'index': 9, 'initial_value': 1}])
@@ -134,13 +142,14 @@ async def test_proxy_registers_serves_and_closes_an_outstation():
     remote = uuid4()
     reply = await call(proxy, proxy.register_outstation_endpoint,
                        {'role': 'outstation', 'host': '127.0.0.1', 'port': 0, 'outstation_address': 4, 'master_address': 3,
-                        'points': SERVED_POINTS}, remote=remote)
+                        'points': SERVED_POINTS, 'values': {'s/ai1': 11, 's/ai0': 0}}, remote=remote)
     key = 'outstation:127.0.0.1:0:4'
-    assert reply == {'result': {'server': key, 'points': len(SERVED_POINTS), 'role': 'outstation'}, 'error': {}}
+    assert reply == {'result': {'server': key, 'points': len(SERVED_POINTS), 'role': 'outstation', 'seeded': 1}, 'error': {}}
     served = proxy.servers[key]
     assert proxy.remotes[remote] is served and served.runner.is_running
     await asyncio.sleep(0.05)
     assert pushes and pushes[0][0] == remote and pushes[0][1]['s/ctr0'] == 42       # the table, pushed on registration
+    assert pushes[0][1]['s/ai1'] == 11 and pushes[0][1]['s/ai0'] == pytest.approx(240.1)   # seeded, and kept
 
     reply = await call(proxy, proxy.read_points_endpoint, {'mode': 'class', 'topics': ['s/ai0']}, remote=remote)
     assert reply['result']['s/ai0']['value'] == pytest.approx(240.1)

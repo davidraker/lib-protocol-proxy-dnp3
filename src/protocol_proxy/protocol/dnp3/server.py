@@ -204,6 +204,27 @@ class ServedOutstation:
         self._by_key = by_key
         return len(self.points)
 
+    def seed(self, values: dict[str, Any]) -> int:
+        """Take the caller's current values for points this outstation holds no value for yet (quality not ONLINE).
+
+        The platform sends its equipment tree's values with the registration, so a proxy that restarted gets the served
+        values back from the platform's memory; values this process already holds (a platform restart) win.
+        """
+        seeded = 0
+        for topic, value in values.items():
+            spec = self.points.get(topic)
+            if spec is None or spec.held.updater is None:
+                continue
+            point = self._point(spec)
+            if point is None or int(point.quality) & 0x01:
+                continue
+            try:
+                self.store(spec, spec.raw_typed(value))
+                seeded += 1
+            except (TypeError, ValueError) as e:
+                _log.warning(f'{self.host}:{self.port}: ignoring seed value {value!r} for {topic}: {e}')
+        return seeded
+
     def spec_at(self, kind: PointKind, index: int) -> ServedPoint | None:
         return self._by_key.get((kind, index))
 
