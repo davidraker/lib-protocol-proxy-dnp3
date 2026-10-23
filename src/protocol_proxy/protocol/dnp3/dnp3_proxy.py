@@ -190,6 +190,19 @@ class Dnp3Proxy(AsyncioProtocolProxy):
         results, errors = await client.write(message.get('operations') or [], control_mode=message.get('control_mode', 'direct'))
         return serialize(results, errors)
 
+    async def stop(self):
+        """Close every master connection and served outstation before the IPC stops, so their streams and transports
+        are released while the loop still runs (not reclaimed later with a ResourceWarning)."""
+        for client in list({id(c): c for c in [*self.clients.values(), *self.servers.values()]}.values()):
+            try:
+                await client.close()
+            except Exception as e:  # pragma: no cover
+                _log.debug(f'Error closing a DNP3 remote on stop: {e}')
+        self.clients.clear()
+        self.servers.clear()
+        self.remotes.clear()
+        await super(Dnp3Proxy, self).stop()
+
     @callback
     async def close_outstation_endpoint(self, headers, raw_message: bytes):
         message = self._decode(raw_message)
