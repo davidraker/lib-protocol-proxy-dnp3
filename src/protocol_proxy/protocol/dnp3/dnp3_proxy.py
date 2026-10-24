@@ -216,7 +216,3 @@ class Dnp3Proxy(AsyncioProtocolProxy):
             await client.close()
         return serialize({'closed': client is not None})
 
-    @classmethod
-    def get_unique_remote_id(cls, unique_remote_id: tuple) -> tuple:
-        """Identify the proxy process a caller wants; all outstations share one unless the caller groups them."""
-        return tuple(unique_remote_id)

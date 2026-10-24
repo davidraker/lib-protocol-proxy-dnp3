@@ -11,6 +11,9 @@ from protocol_proxy.proxy.launch import resolve_launcher
 from protocol_proxy.protocol.dnp3.dnp3_proxy import Dnp3Proxy
 from protocol_proxy.protocol.dnp3.json import serialize
 from tests.conftest import MASTER, OUTSTATION, POINTS
+from pathlib import Path as _Path
+from protocol_proxy.manifest import Manifest as _Manifest
+_MANIFEST = _Path(__file__).parents[1] / 'src' / 'protocol_proxy' / 'protocol' / 'dnp3' / 'proxy.toml'   # the identity rule lives here now
 
 
 def make_proxy() -> Dnp3Proxy:
@@ -44,7 +47,7 @@ async def test_callbacks_registered_and_launch_shape():
     assert {'REGISTER_OUTSTATION', 'READ_POINTS', 'WRITE_POINTS', 'CLOSE_OUTSTATION'} <= set(proxy.callbacks)
     assert all(proxy.callbacks[n].timeout == 120.0 for n in ('READ_POINTS', 'WRITE_POINTS'))
     assert Dnp3Proxy.LAUNCHER is None and Dnp3Proxy.PATCH_GEVENT is False and package.PROXY_CLASS is Dnp3Proxy
-    assert Dnp3Proxy.get_unique_remote_id(['dnp3', 'site']) == ('dnp3', 'site')
+    assert _Manifest.load(_MANIFEST).process_key(['dnp3', 'site'], {}) == ('dnp3', 'site')
     assert resolve_launcher('protocol_proxy.protocol.dnp3.dnp3_proxy:Dnp3Proxy') is not None
 
 

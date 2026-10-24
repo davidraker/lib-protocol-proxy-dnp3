@@ -14,6 +14,9 @@ homepage = "https://github.com/eclipse-volttron/lib-protocol-proxy-dnp3"
 keywords = []
 packages = [ { include = "protocol_proxy", from = "src" } ]
 
+[tool.poetry.plugins."protocol_proxy.manifests"]
+dnp3 = "protocol_proxy.protocol.dnp3:proxy.toml"
+
 [tool.poetry.dependencies]
 python = ">=3.11,<4.0"
 protocol-proxy = ">=2.0.0rc3"
