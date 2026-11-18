@@ -156,7 +156,7 @@ class Dnp3Proxy(AsyncioProtocolProxy):
                                           unsolicited_classes=message.get('unsolicited_classes') or (1, 2, 3))
                 served.push = partial(self._push, served)
             served.remote_id = remote_id
-            count = served.configure_points(message.get('points') or [], message.get('values') or {})
+            count = served.configure_points(message.get('points') or [], message.get('values') or {}, message.get('mux_areas') or None)
             await served.start()
         except Exception as e:      # a bad row, or whatever the listener's bind raised (dnp3py's ChannelError, OSError)
             _log.warning(f'Failed to serve outstation {key}: {e}')
