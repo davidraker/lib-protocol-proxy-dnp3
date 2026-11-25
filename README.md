@@ -9,9 +9,10 @@ outstations over TCP.
 ## Automatically installed dependencies
 - python = ">=3.11,<4.0"
 - protocol-proxy = ">=2.0.0rc3"
-- dnp3py (pure Python, no C dependencies). Until a release carries analog output command variations, command status
-  delivery and the runner's operate helpers, the dependency is the `volttron-dnp3` branch of the `davidraker/dnp3py`
-  fork, which merges the three pull requests adding them.
+- dnp3py (pure Python, no C dependencies), 0.7.0 or later. Until a release carries the analog output command variations,
+  command status delivery, the runner's operate helpers and the two-octet count fix (craigpnnl/dnp3py PRs #231-#233 and
+  #235), install the `volttron-dnp3` branch of `davidraker/dnp3py`, tagged v0.7.0:
+  `pip install git+https://github.com/davidraker/dnp3py.git@volttron-dnp3`.
 
 # Installation
 
