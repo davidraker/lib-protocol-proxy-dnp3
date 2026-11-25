@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -27,6 +28,8 @@ ANSI = re.compile(r'\x1b\[[0-9;]*m')
 
 def available() -> bool:
     if TOOL_REPO is None or not TOOL_REPO.is_dir():
+        return False
+    if shutil.which('docker') is None:    # no docker binary at all: not available, rather than FileNotFoundError
         return False
     ok = subprocess.run(['docker', 'image', 'inspect', IMAGE], capture_output=True).returncode == 0
     return ok and subprocess.run(['docker', 'volume', 'inspect', CACHE_VOLUME], capture_output=True).returncode == 0
